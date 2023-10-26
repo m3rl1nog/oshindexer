@@ -1,0 +1,16 @@
+{
+  "name": "oshindexer",
+  "version": "1.0.0",
+  "description": "An indexer for BRC20 data using the Blockstream API or a custom Esplora endpoint.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "M3rl1n",
+  "license": "MIT",
+  "dependencies": {
+    "https": "^1.0.0",
+    "fs": "^0.0.1-security",
+    "progress": "^2.0.3"
+  }
+}
