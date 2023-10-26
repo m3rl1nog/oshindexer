@@ -1,4 +1,3 @@
-Of course, here's the GitHub documentation for the code you provided, translated into English:
 
 ---
 
