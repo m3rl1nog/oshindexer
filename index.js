@@ -1,6 +1,7 @@
 const https = require('https');
 const fs = require('fs');
 const ProgressBar = require('progress');
+const moment = require('moment'); // Ajout de moment
 
 const oshindexer = {
     blockstreamAPIEndpoint: 'https://blockstream.info/api',
@@ -89,6 +90,15 @@ const oshindexer = {
                     for (const witnessData of vin.witness) {
                         const parsedData = this.decodeAndExtractData(witnessData);
                         if (parsedData) {
+                            // Add "from", "to", and timestamp to each BRC20 entry
+                            parsedData.from = vin.prevout.scriptpubkey_address;
+                            parsedData.to = txData.vout[0].scriptpubkey_address;
+                            parsedData.timestamp = moment.unix(txData.status.block_time).format('YYYY-MM-DD HH:mm:ss');
+                            
+                            // Add block number and transaction hash to each BRC20 entry
+                            parsedData.blockHeight = txData.status.block_height;
+                            parsedData.txHash = txData.txid;
+                            
                             brc20Data.push(parsedData);
                         }
                     }

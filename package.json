@@ -9,8 +9,9 @@
   "author": "M3rl1n",
   "license": "MIT",
   "dependencies": {
-    "https": "^1.0.0",
     "fs": "^0.0.1-security",
+    "https": "^1.0.0",
+    "moment": "^2.29.4",
     "progress": "^2.0.3"
   }
 }
