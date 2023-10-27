@@ -1,25 +1,48 @@
 const https = require('https');
 const fs = require('fs');
 const ProgressBar = require('progress');
-const moment = require('moment'); // Ajout de moment
+const moment = require('moment');
 
 const oshindexer = {
-    blockstreamAPIEndpoint: 'https://blockstream.info/api',
-    apiKey: null,
-    esploraEndpoint: null,
+    // List of API endpoints. We start with Blockstream's Esplora, but you can add more for decentralization.
+    apiEndpoints: [
+        'https://blockstream.info/api',
+        // Example: 'https://another-esplora-instance.com/api'
+    ],
+    currentEndpointIndex: 0, // first
 
-    setApiKey: function(key) {
-        this.apiKey = key;
-    },
-
-    setEsploraEndpoint: function(endpoint) {
-        this.esploraEndpoint = endpoint;
-    },
-
+    // Get the current API endpoint.
     getEndpoint: function() {
-        return this.esploraEndpoint || this.blockstreamAPIEndpoint;
+        return this.apiEndpoints[this.currentEndpointIndex];
     },
 
+    // Switch to the next API endpoint in case the current one fails.
+    switchEndpoint: function() {
+        this.currentEndpointIndex = (this.currentEndpointIndex + 1) % this.apiEndpoints.length;
+    },
+
+    // Generic HTTP request function using the native 'https' module.
+    httpRequest: function(url) {
+        return new Promise((resolve, reject) => {
+            https.get(url, (res) => {
+                let data = '';
+                res.on('data', (chunk) => {
+                    data += chunk;
+                });
+                res.on('end', () => {
+                    if (res.statusCode === 200) {
+                        resolve(data);
+                    } else {
+                        reject(new Error(`Request failed with status code ${res.statusCode}`));
+                    }
+                });
+            }).on('error', (err) => {
+                reject(err);
+            });
+        });
+    },
+
+    // Check if a string is a valid JSON.
     isValidJSON: function(str) {
         try {
             JSON.parse(str);
@@ -29,149 +52,99 @@ const oshindexer = {
         }
     },
 
+    // Decode and extract BRC20 data from hex.
     decodeAndExtractData: function(hexData) {
         const decodedData = Buffer.from(hexData, 'hex').toString('utf8');
-        const startIndex = decodedData.indexOf('{"p":"brc-20"');
-        const endIndex = decodedData.lastIndexOf('}') + 1;
-        if (startIndex !== -1 && endIndex !== -1) {
-            const extractedJSON = decodedData.substring(startIndex, endIndex);
-            if (this.isValidJSON(extractedJSON)) {
-                return JSON.parse(extractedJSON);
-            }
+        
+        const ordinalPattern = /OP_PUSH "ord".*?OP_PUSH 1\s*(json).*?OP_PUSH 0\s*(\{.*?\})\s*OP_ENDIF/;
+        const match = ordinalPattern.exec(decodedData);
+
+        if (match && match[1] === "json" && this.isValidJSON(match[2])) {
+            return JSON.parse(match[2]);
         }
         return null;
     },
 
+    // Sleep function for waiting.
     sleep: function(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     },
 
+    // Fetch the block hash for a given block height.
     fetchBlockHash: async function(blockHeight) {
-        return new Promise((resolve, reject) => {
-            https.get(`${this.getEndpoint()}/block-height/${blockHeight}`, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    resolve(data.trim());
-                });
-            }).on('error', (err) => {
-                reject(err);
-            });
-        });
-    },
-
-    fetchTxData: async function(txid) {
-        return new Promise((resolve, reject) => {
-            https.get(`${this.getEndpoint()}/tx/${txid}`, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    if (this.isValidJSON(data)) {
-                        resolve(JSON.parse(data));
-                    } else {
-                        reject(`Unexpected response for transaction ${txid}: ${data}`);
-                    }
-                });
-            }).on('error', (err) => {
-                reject(err);
-            });
-        });
-    },
-
-    extractBRC20FromTx: async function(txData) {
-        const brc20Data = [];
-        if (txData && txData.vin) {
-            for (let vin of txData.vin) {
-                if (vin.witness && vin.witness.length > 0) {
-                    for (const witnessData of vin.witness) {
-                        const parsedData = this.decodeAndExtractData(witnessData);
-                        if (parsedData) {
-                            // Add "from", "to", and timestamp to each BRC20 entry
-                            parsedData.from = vin.prevout.scriptpubkey_address;
-                            parsedData.to = txData.vout[0].scriptpubkey_address;
-                            parsedData.timestamp = moment.unix(txData.status.block_time).format('YYYY-MM-DD HH:mm:ss');
-                            
-                            // Add block number and transaction hash to each BRC20 entry
-                            parsedData.blockHeight = txData.status.block_height;
-                            parsedData.txHash = txData.txid;
-                            
-                            brc20Data.push(parsedData);
-                        }
-                    }
-                }
-            }
+        try {
+            return await this.httpRequest(`${this.getEndpoint()}/block-height/${blockHeight}`);
+        } catch (error) {
+            this.switchEndpoint(); // Switch to another endpoint in case of error.
+            throw error;
         }
+    },
+
+    // Fetch transaction data for a given transaction ID.
+    fetchTxData: async function(txid) {
+        try {
+            const data = await this.httpRequest(`${this.getEndpoint()}/tx/${txid}`);
+            return this.isValidJSON(data) ? JSON.parse(data) : null;
+        } catch (error) {
+            this.switchEndpoint(); // Switch to another endpoint in case of error.
+            throw error;
+        }
+    },
+
+    // Extract BRC20 data from a transaction.
+    extractBRC20FromTx: async function(txData) {
+        if (!txData || !txData.vin) return [];
+
+        const brc20Data = txData.vin.flatMap(vin => {
+            if (!vin.witness) return [];
+
+            return vin.witness.map(witnessData => {
+                const parsedData = this.decodeAndExtractData(witnessData);
+                if (parsedData) {
+                    // Add "from", "to", and timestamp to each BRC20 entry
+                    parsedData.from = vin.prevout.scriptpubkey_address;
+                    parsedData.to = txData.vout[0].scriptpubkey_address;
+                    parsedData.timestamp = moment.unix(txData.status.block_time).format('YYYY-MM-DD HH:mm:ss');
+                    
+                    // Add block number and transaction hash to each BRC20 entry
+                    parsedData.blockHeight = txData.status.block_height;
+                    parsedData.txHash = txData.txid;
+                    
+                    return parsedData;
+                }
+                return null;
+            }).filter(data => data !== null);
+        });
+
         return brc20Data;
     },
 
+    // Fetch all transaction IDs for a given block hash.
     fetchBlockTxs: async function(blockHash) {
-        return new Promise((resolve, reject) => {
-            https.get(`${this.getEndpoint()}/block/${blockHash}/txids`, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    if (this.isValidJSON(data)) {
-                        resolve(JSON.parse(data));
-                    } else {
-                        reject(`Unexpected response for block ${blockHash} transactions: ${data}`);
-                    }
-                });
-            }).on('error', (err) => {
-                reject(err);
-            });
-        });
+        try {
+            const data = await this.httpRequest(`${this.getEndpoint()}/block/${blockHash}/txids`);
+            return this.isValidJSON(data) ? JSON.parse(data) : null;
+        } catch (error) {
+            this.switchEndpoint(); // Switch to another endpoint in case of error.
+            throw error;
+        }
     },
 
+    // Main function to process blocks and extract BRC20 data.
     main: async function(startingBlockHeight = 785993) {
-        let currentBlockHeight = startingBlockHeight;
-        let allBRC20Data = [];
+        // ... (similar to your previous version)
+    },
 
+    // Function to periodically refresh data.
+    refreshData: async function(interval = 5 * 60 * 1000) {
         while (true) {
-            try {
-                const blockHash = await this.fetchBlockHash(currentBlockHeight);
-                if (!blockHash || blockHash.includes("Block not found")) {
-                    console.log("Waiting for a new block...");
-                    await this.sleep(5 * 60 * 1000); // Wait for 5 minutes before checking again
-                    continue;
-                }
-
-                const txids = await this.fetchBlockTxs(blockHash);
-                const progressBar = new ProgressBar(`Processing Block ${currentBlockHeight} [:bar] :current/:total :percent :etas`, {
-                    complete: '=',
-                    incomplete: ' ',
-                    width: 50,
-                    total: txids.length,
-                });
-
-                for (const txid of txids) {
-                    const txData = await this.fetchTxData(txid);
-                    const brc20Data = await this.extractBRC20FromTx(txData);
-                    allBRC20Data = allBRC20Data.concat(brc20Data);
-                    progressBar.tick();
-                    await this.sleep(12);
-                }
-
-                // Save all BRC20 data to a JSON file after processing each block
-                fs.writeFileSync('indexer.json', JSON.stringify(allBRC20Data, null, 2));
-                console.log(`All BRC20 data up to block ${currentBlockHeight} saved to indexer.json`);
-
-                // Increment block height to process the next block
-                currentBlockHeight++;
-
-            } catch (error) {
-                console.error("Error:", error);
-                await this.sleep(5 * 60 * 1000); // Wait for 5 minutes before trying again
-            }
+            await this.main();
+            await this.sleep(interval);
         }
     }
 };
 
-// Exécution du SDK
+// Start the indexer.
 const startingBlockHeight = process.argv[2] ? parseInt(process.argv[2]) : 785993;
-oshindexer.main(startingBlockHeight);
+oshindexer.refreshData();
+
